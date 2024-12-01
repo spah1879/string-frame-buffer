@@ -6,8 +6,12 @@ import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 import io.github.spah1879.stringframebuffer.annotation.FieldSpec;
 import io.github.spah1879.stringframebuffer.exception.StringFrameBufferException;
@@ -15,60 +19,79 @@ import io.github.spah1879.stringframebuffer.exception.StringFrameBufferException
 public abstract class StringFrameBuffer {
 
   private static boolean isStringFrameBuffer(Class<?> type) {
-    return StringFrameBuffer.class.isAssignableFrom(type);
+    return type.isAssignableFrom(StringFrameBuffer.class);
+  }
+
+  private static boolean isAssignableFromBoolean(Class<?> type) {
+    return type == boolean.class || type.isAssignableFrom(Boolean.class);
   }
 
   private StringFrameBuffer getNewInstance(Class<? extends StringFrameBuffer> clazz) {
     try {
       Constructor<?> constructor = clazz.getDeclaredConstructor();
-      try {
-        if (!constructor.isAccessible()) {
-          constructor.setAccessible(true);
-        }
-        return (StringFrameBuffer) constructor.newInstance();
-      } catch (InstantiationException | IllegalAccessException | InvocationTargetException
-          | IllegalArgumentException e) {
-        throw new StringFrameBufferException("Failed to construct a new Instance. Class : " + clazz.getName(), e);
-      } finally {
-        constructor.setAccessible(false);
-      }
-    } catch (NoSuchMethodException e) {
+      return (StringFrameBuffer) constructor.newInstance();
+    } catch (NoSuchMethodException | InstantiationException | IllegalAccessException | InvocationTargetException
+        | IllegalArgumentException e) {
       throw new StringFrameBufferException("Failed to construct a new Instance. Class : " + clazz.getName(), e);
     }
+  }
+
+  private Object getFieldObject(Class<?> clazz, Field field, StringFrameBuffer frameBuffer)
+      throws NoSuchMethodException, SecurityException, IllegalAccessException, IllegalArgumentException,
+      InvocationTargetException {
+    StringBuilder sb = new StringBuilder();
+    String name = field.getName();
+
+    sb.append(isAssignableFromBoolean(field.getType()) ? "is" : "get");
+    sb.append(name.substring(0, 1).toUpperCase());
+    if (name.length() > 1) {
+      sb.append(name.substring(1));
+    }
+
+    Method method = clazz.getDeclaredMethod(sb.toString());
+    return method.invoke(frameBuffer);
   }
 
   private void getObjectBytes(Object obj, FieldSpec spec, ByteArrayOutputStream baos)
       throws IOException, BufferOverflowException, IllegalArgumentException {
     byte[] bytes;
-    char padding = spec.padding();
-    boolean isLeadingPadding = true;
 
     if (obj instanceof String) {
       String value = (String) obj;
       bytes = value.getBytes(spec.charSet());
-      if (padding == 0)
-        padding = ' ';
-      isLeadingPadding = false;
     } else if (obj instanceof Integer) {
       Integer value = (Integer) obj;
       bytes = String.valueOf(value).getBytes();
-      if (padding == 0)
-        padding = '0';
     } else if (obj instanceof Float) {
       Float value = (Float) obj;
       bytes = String.valueOf(value).getBytes();
-      if (padding == 0)
-        padding = '0';
     } else if (obj instanceof Double) {
       Double value = (Double) obj;
       bytes = String.valueOf(value).getBytes();
-      if (padding == 0)
-        padding = '0';
+    } else if (obj instanceof Boolean) {
+      Boolean value = (Boolean) obj;
+      bytes = new byte[] { value.booleanValue() ? (byte) '1' : (byte) '0' };
+    } else if (obj instanceof Date) {
+      Date value = (Date) obj;
+      String formatter = spec.formatter();
+      if (formatter.isEmpty()) {
+        throw new IllegalArgumentException("A 'formatter' must be set for the Date Type - " + obj.getClass().getName());
+      }
+      String stringValue = new SimpleDateFormat(formatter).format(value);
+      bytes = stringValue.getBytes(spec.charSet());
     } else {
       throw new IllegalArgumentException("Unhandled Object Type - " + obj.getClass().getName());
     }
 
-    int length = spec.value();
+    int length = spec.length();
+    char padding = spec.padding();
+    boolean isNumber = Number.class.isAssignableFrom(obj.getClass());
+    boolean isLeadingPadding = isNumber;
+
+    if (padding == 0) {
+      padding = isNumber ? '0' : ' ';
+    }
+
     if (bytes != null) {
       if (bytes.length >= length) {
         baos.write(bytes, 0, length);
@@ -93,21 +116,22 @@ public abstract class StringFrameBuffer {
 
     for (Field field : clazz.getDeclaredFields()) {
       FieldSpec spec = field.getAnnotation(FieldSpec.class);
+      Class<?> type = field.getType();
+      if (spec == null && !isStringFrameBuffer(type))
+        continue;
       try {
-        field.setAccessible(true);
-        Object obj = field.get(frameBuffer);
+        Object obj = getFieldObject(clazz, field, frameBuffer);
+        if (obj == null) {
+          throw new StringFrameBufferException("Value of field is Null.", clazz, field, spec);
+        }
         if (spec != null) {
-          if (obj == null) {
-            throw new StringFrameBufferException("Value of field is Null.", clazz, field, spec);
-          }
           getObjectBytes(obj, spec, baos);
-        } else if (obj != null && isStringFrameBuffer(field.getType())) {
+        } else {
           getBytes((StringFrameBuffer) obj, baos);
         }
-      } catch (IllegalArgumentException | IllegalAccessException | IOException | BufferOverflowException e) {
+      } catch (NoSuchMethodException | IllegalAccessException | IllegalArgumentException | InvocationTargetException
+          | IOException | BufferOverflowException e) {
         throw new StringFrameBufferException(clazz, field, spec, e);
-      } finally {
-        field.setAccessible(false);
       }
     }
   }
@@ -122,29 +146,53 @@ public abstract class StringFrameBuffer {
     return ByteBuffer.wrap(getBytes());
   }
 
+  private void setFieldObject(Class<?> clazz, Field field, StringFrameBuffer result, Object obj)
+      throws NoSuchMethodException, SecurityException, IllegalAccessException, IllegalArgumentException,
+      InvocationTargetException {
+    StringBuilder sb = new StringBuilder();
+    String name = field.getName();
+
+    sb.append("set");
+    sb.append(name.substring(0, 1).toUpperCase());
+    if (name.length() > 1) {
+      sb.append(name.substring(1));
+    }
+
+    Method method = clazz.getDeclaredMethod(sb.toString(), field.getType());
+    method.invoke(result, obj);
+  }
+
   private Object fromBytesToObject(Field field, FieldSpec spec, ByteArrayInputStream bais) {
     try {
       Class<?> type = field.getType();
-      byte[] bytes = new byte[spec.value()];
+      byte[] bytes = new byte[spec.length()];
 
       bais.read(bytes);
       String stringValue = new String(bytes, spec.charSet());
       Object obj;
 
-      if (type == String.class) {
+      if (type.isAssignableFrom(String.class)) {
         obj = stringValue;
-      } else if (type == Integer.class || type == int.class) {
+      } else if (type == int.class || type.isAssignableFrom(Integer.class)) {
         obj = Integer.valueOf(stringValue);
-      } else if (type == Float.class || type == float.class) {
+      } else if (type == float.class || type.isAssignableFrom(Float.class)) {
         obj = Float.valueOf(stringValue);
-      } else if (type == Double.class || type == double.class) {
+      } else if (type == double.class || type.isAssignableFrom(Double.class)) {
         obj = Double.valueOf(stringValue);
+      } else if (isAssignableFromBoolean(type)) {
+        obj = Integer.valueOf(stringValue) == 0 ? Boolean.FALSE : Boolean.TRUE;
+      } else if (type.isAssignableFrom(Date.class)) {
+        String formatter = spec.formatter();
+        if (formatter.isEmpty()) {
+          throw new IllegalArgumentException("A 'formatter' must be set for the Date Type.");
+        }
+        obj = new SimpleDateFormat(spec.formatter()).parse(stringValue.trim());
       } else {
         throw new IllegalArgumentException("Unhandled Type - " + type.getName());
       }
 
       return obj;
-    } catch (StringIndexOutOfBoundsException | IOException e) {
+    } catch (StringIndexOutOfBoundsException | IOException | ParseException e) {
       throw new StringFrameBufferException(field.getDeclaringClass(), field, spec, e);
     }
   }
@@ -156,43 +204,39 @@ public abstract class StringFrameBuffer {
 
     for (Field field : clazz.getDeclaredFields()) {
       FieldSpec spec = field.getAnnotation(FieldSpec.class);
+      Class<?> type = field.getType();
+      if (spec == null && !isStringFrameBuffer(type))
+        continue;
       try {
-        Class<?> type = field.getType();
         Object obj;
         if (spec != null) {
           obj = fromBytesToObject(field, spec, bais);
-        } else if (isStringFrameBuffer(type)) {
-          obj = fromBytes(bais, null, (Class<? extends StringFrameBuffer>) type);
         } else {
-          obj = null;
+          obj = fromBytes(bais, null, (Class<? extends StringFrameBuffer>) type);
         }
-        if (obj != null) {
-          field.setAccessible(true);
-          field.set(result, obj);
-        }
-      } catch (IllegalArgumentException | IllegalAccessException e) {
+        setFieldObject(clazz, field, result, obj);
+      } catch (NoSuchMethodException | SecurityException | IllegalAccessException | IllegalArgumentException
+          | InvocationTargetException e) {
         throw new StringFrameBufferException(result.getClass(), field, spec, e);
-      } finally {
-        field.setAccessible(false);
       }
     }
 
     return result;
   }
 
-  public <T extends StringFrameBuffer> T fromBytes(byte[] bytes, int offset) {
+  public <T> T fromBytes(byte[] bytes, int offset) {
     return (T) fromBytes(new ByteArrayInputStream(bytes, offset, bytes.length - offset), this, getClass());
   }
 
-  public <T extends StringFrameBuffer> T fromBytes(byte[] bytes) {
+  public <T> T fromBytes(byte[] bytes) {
     return fromBytes(bytes, 0);
   }
 
-  public <T extends StringFrameBuffer> T fromByteBuffer(ByteBuffer buffer, int offset) {
+  public <T> T fromByteBuffer(ByteBuffer buffer, int offset) {
     return fromBytes(buffer.array(), offset);
   }
 
-  public <T extends StringFrameBuffer> T fromByteBuffer(ByteBuffer buffer) {
+  public <T> T fromByteBuffer(ByteBuffer buffer) {
     return fromBytes(buffer.array(), 0);
   }
 

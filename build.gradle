@@ -19,7 +19,7 @@ compileTestJava.options.encoding = "UTF-8"
 compileTestJava.options.compilerArgs << "-Xlint:unchecked"
 
 group "io.github.spah1879"
-version "0.1.0"
+version "0.1.1"
 
 configurations {
   compileOnly {

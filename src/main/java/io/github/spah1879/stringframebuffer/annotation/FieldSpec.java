@@ -9,9 +9,15 @@ import java.lang.annotation.Target;
 @Target(ElementType.FIELD)
 public @interface FieldSpec {
 
-  int value();
+  int length();
 
   char padding() default '\u0000';
 
   String charSet() default "UTF-8";
+
+  String formatter() default "";
+
+  // not used
+  int value() default 0;
+
 }
